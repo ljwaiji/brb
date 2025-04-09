@@ -45,10 +45,15 @@ y_test = y[test_index].to(device)
 brb_X_train = brb_X[train_index].to(device)
 brb_X_test = brb_X[test_index].to(device)
 
-# 初始化可训练参数
-theta = torch.ones(L, requires_grad=True, device=device)     # 规则权重
-delta = torch.ones(T, requires_grad=True, device=device)     # 属性权重
-beta = torch.randn(L, N, requires_grad=True, device=device)  # 置信度参数
+# 初始化可训练参数，使用更好的初始化方法
+# 使用均匀分布初始化theta，避免全部为1的情况
+theta = torch.rand(L, requires_grad=True, device=device) * 0.5 + 0.25  # 初始化在[0.25, 0.75]范围内
+# 使用均匀分布初始化delta，避免全部为1的情况
+delta = torch.rand(T, requires_grad=True, device=device) * 0.5 + 0.25  # 初始化在[0.25, 0.75]范围内
+# 使用更为均衡的beta初始化
+beta = torch.ones(L, N, device=device) / N  # 均匀初始化beta，使每个后件具有相同的初始可能性
+beta = beta + torch.randn(L, N, device=device) * 0.01  # 添加小扰动
+beta = beta.clone().detach().requires_grad_(True)  # 设置为可训练
 
 # 创建优化器和学习率调度器
 optimizer = Adan(
@@ -56,8 +61,8 @@ optimizer = Adan(
     lr=1e-3,  # 增大学习率
     betas=(0.98, 0.92, 0.99),  # 使用更激进的动量参数
     eps=1e-8,  # 适度的数值稳定性
-    weight_decay=0.0,  # 适当的正则化强度
-    max_grad_norm=0.0,  # 放宽梯度裁剪
+    weight_decay=0.01,  # 增加权重衰减以提供更强的正则化
+    max_grad_norm=1.0,  # 启用梯度裁剪以稳定训练
     no_prox=False
 )
 # 替换学习率调度策略
@@ -73,6 +78,7 @@ early_stopping_patience = 150
 early_stopping_counter = 0
 best_loss = float('inf')
 best_params = None
+reg_strength = 0.01  # 初始正则化强度
 
 # 训练参数
 epochs = 1000
@@ -111,7 +117,18 @@ for epoch in range(epochs):
         y_hat = infer.execute()
         
         # 计算MSE损失
-        loss = torch.mean((y_hat.squeeze() - batch_y)**2)
+        mse_loss = torch.mean((y_hat.squeeze() - batch_y)**2)
+        
+        # 添加正则化项，促进参数分布更均衡
+        # 1. 添加熵正则项，使beta参数更均衡分布
+        entropy_reg = -torch.mean(torch.sum(F.softmax(beta, dim=1) * F.log_softmax(beta, dim=1), dim=1))
+        # 2. 为theta添加中心正则项，避免theta全部靠近0或1
+        theta_center_reg = torch.mean((theta - 0.5).pow(2))
+        # 3. 为delta添加中心正则项，避免delta全部靠近0或1
+        delta_center_reg = torch.mean((delta - 0.5).pow(2))
+        
+        # 组合损失
+        loss = mse_loss - reg_strength * entropy_reg + reg_strength * (theta_center_reg + delta_center_reg)
         
         # 使用Adan优化器更新参数
         optimizer.zero_grad()
@@ -124,7 +141,7 @@ for epoch in range(epochs):
             delta.data.clamp_(0, 1)  # 属性权重约束在[0,1]
             beta.data = torch.nn.functional.softmax(beta.data, dim=1)  # beta归一化
         
-        epoch_loss += loss.item()
+        epoch_loss += mse_loss.item()  # 仍然记录MSE损失，便于比较
     
     # 更新学习率
     scheduler.step()
@@ -154,8 +171,20 @@ for epoch in range(epochs):
     # 获取当前学习率
     current_lr = optimizer.param_groups[0]['lr']
     
+    # 监控参数分布情况
+    with torch.no_grad():
+        theta_avg = theta.mean().item()
+        delta_avg = delta.mean().item()
+        beta_entropy = -torch.mean(torch.sum(beta * torch.log(beta + 1e-10), dim=1)).item()
+    
     print(f'Epoch {epoch+1}/{epochs} | Train Loss: {epoch_loss:.4f} | Test Loss: {test_loss:.4f} | LR: {current_lr:.6f}')
-
+    print(f'Params: theta_avg={theta_avg:.3f}, delta_avg={delta_avg:.3f}, beta_entropy={beta_entropy:.3f}')
+    
+    # 动态调整正则化强度 - 训练初期较弱，后期较强
+    if epoch > epochs // 2:
+        # 训练后期增加正则化强度
+        reg_strength = min(0.05, 0.01 + (epoch - epochs // 2) * 0.0001)  # 逐渐增加到0.05
+    
     # 早停机制
     if test_loss < best_loss:
         best_loss = test_loss
