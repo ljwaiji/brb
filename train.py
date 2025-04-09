@@ -4,18 +4,21 @@ from sklearn.model_selection import train_test_split
 from adan import Adan
 import utils as ut
 import ebrb_torch as et
+from torch.nn import functional as F
 
 # 设置设备
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # 加载数据
-data = np.loadtxt('C:\\Users\\liu2021\\Desktop\\brb_test\\oil.data')
+data = np.loadtxt('oil.data')
 X = torch.tensor(data[:, :2], dtype=torch.float32, device=device)  # 输入特征：压力和流量
 y = torch.tensor(data[:, 2], dtype=torch.float32, device=device)   # 标签：泄漏状态
 
-# 数据标准化
-X = (X - X.mean(dim=0)) / X.std(dim=0)
-y = (y - y.mean()) / y.std()
+# 数据标准化 - 使用Min-Max标准化代替Z-Score标准化
+X_min, X_max = X.min(dim=0)[0], X.max(dim=0)[0]
+X = (X - X_min) / (X_max - X_min)
+y_min, y_max = y.min(), y.max()
+y = (y - y_min) / (y_max - y_min)
 
 # 设置BRB参数
 reference_num = 7
