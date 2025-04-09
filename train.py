@@ -60,7 +60,19 @@ optimizer = Adan(
     max_grad_norm=0.0,  # 放宽梯度裁剪
     no_prox=False
 )
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=50, factor=0.5)
+# 替换学习率调度策略
+scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer, 
+    T_0=100,  # 初始周期
+    T_mult=2,  # 周期倍增因子
+    eta_min=1e-5  # 最小学习率
+)
+
+# 早停机制设置
+early_stopping_patience = 150
+early_stopping_counter = 0
+best_loss = float('inf')
+best_params = None
 
 # 训练参数
 epochs = 1000
@@ -115,7 +127,7 @@ for epoch in range(epochs):
         epoch_loss += loss.item()
     
     # 更新学习率
-    scheduler.step(epoch_loss)
+    scheduler.step()
     
     # 验证
     with torch.no_grad():
@@ -139,7 +151,29 @@ for epoch in range(epochs):
         # 计算测试集MSE损失
         test_loss = torch.mean((y_test_hat.squeeze() - y_test)**2)
     
-    print(f'Epoch {epoch+1}/{epochs} | Train Loss: {epoch_loss:.4f} | Test Loss: {test_loss:.4f}')
+    # 获取当前学习率
+    current_lr = optimizer.param_groups[0]['lr']
+    
+    print(f'Epoch {epoch+1}/{epochs} | Train Loss: {epoch_loss:.4f} | Test Loss: {test_loss:.4f} | LR: {current_lr:.6f}')
+
+    # 早停机制
+    if test_loss < best_loss:
+        best_loss = test_loss
+        early_stopping_counter = 0
+        best_params = {
+            'theta': theta.data.clone(),
+            'delta': delta.data.clone(),
+            'beta': beta.data.clone()
+        }
+    else:
+        early_stopping_counter += 1
+        if early_stopping_counter >= early_stopping_patience:
+            print("早停机制触发，训练停止")
+            # 恢复最佳模型参数
+            theta.data = best_params['theta']
+            delta.data = best_params['delta']
+            beta.data = best_params['beta']
+            break
 
 # 最终测试
 with torch.no_grad():
